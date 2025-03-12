@@ -16,6 +16,7 @@ static void print_help(void) {
 		"Commands:\n"
 		"md5\n"
 		"sha256\n"
+		"whirlpool\n"
 		"\n"
 		"Flags:\n"
 		"-p -q -r -s\n"
@@ -26,6 +27,7 @@ int main(int argc, char **argv) {
 	static t_command const commands[] = {
 		{ "md5", &md5_digest},
 		{ "sha256", &sha256_digest },
+		{ "whirlpool", &whirlpool_digest },
 	};
 
 	if (argc < 2) {

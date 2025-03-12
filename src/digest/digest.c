@@ -7,6 +7,7 @@
 #include "md5.h"
 #include "sha256.h"
 #include "utils.h"
+#include "whirlpool.h"
 
 #define DIGEST_BLOCK_SIZE 512
 #define DIGEST_BLOCK_BYTES (DIGEST_BLOCK_SIZE / 8)
@@ -23,16 +24,19 @@ struct digest_args {
 enum e_digest {
 	D_MD5,
 	D_SHA256,
+	D_WHIRLPOOL,
 };
 
 typedef union {
 	struct md5_state md5_state;
 	struct sha256_state sha256_state;
+	struct whirlpool_state whirlpool_state;
 } t_digest_state;
 
 typedef union {
 	struct hash128 md5;
 	struct hash256 sha256;
+	struct hash512 whirlpool;
 } t_digest_hash;
 
 static t_digest_state digest_state(enum e_digest digest) {
@@ -44,6 +48,9 @@ static t_digest_state digest_state(enum e_digest digest) {
 			return state;
 		case D_SHA256:
 			state.sha256_state = sha256_state();
+			return state;
+		case D_WHIRLPOOL:
+			state.whirlpool_state = whirlpool_state();
 			return state;
 	}
 }
@@ -132,6 +139,9 @@ static t_digest_state digest_round(enum e_digest digest, t_digest_state state, c
 		case D_SHA256:
 			state.sha256_state = sha256_round(state.sha256_state, m);
 			return state;
+		case D_WHIRLPOOL:
+			state.whirlpool_state = whirlpool_round(state.whirlpool_state, m);
+			return state;
 	}
 }
 
@@ -143,6 +153,9 @@ static t_digest_hash digest_final_round(enum e_digest digest, t_digest_state sta
 			return hash;
 		case D_SHA256:
 			hash.sha256 = sha256_final_round(state.sha256_state, m, bits);
+			return hash;
+		case D_WHIRLPOOL:
+			hash.whirlpool = whirlpool_final_round(state.whirlpool_state, m, bits);
 			return hash;
 	}
 }
@@ -159,6 +172,11 @@ static void print_hash(int fd, enum e_digest digest, t_digest_hash *hash) {
 			ft_putstr(fd, hex.hex);
 			return;
 		}
+		case D_WHIRLPOOL: {
+			struct hash512_hex hex = hash512_hex(&hash->whirlpool);
+			ft_putstr(fd, hex.hex);
+			return;
+		}
 	}
 }
 
@@ -166,6 +184,7 @@ static char const *digest_name(enum e_digest digest) {
 	static char const *const names[] = {
 		[D_MD5] = "MD5",
 		[D_SHA256] = "SHA256",
+		[D_WHIRLPOOL] = "WHIRLPOOL",
 	};
 
 	return names[digest];
@@ -317,6 +336,20 @@ t_result sha256_digest(char **args) {
 	if (
 		parse_digest_args(args, &opts) != OK ||
 		exec_digest(D_SHA256, &opts) != OK
+	) {
+		print_error(STDERR_FILENO);
+		exit(1);
+	}
+	reset_err_prefix();
+	return reset_error();
+}
+
+t_result whirlpool_digest(char **args) {
+	set_err_prefix("whirlpool");
+	struct digest_args opts;
+	if (
+		parse_digest_args(args, &opts) != OK ||
+		exec_digest(D_WHIRLPOOL, &opts) != OK
 	) {
 		print_error(STDERR_FILENO);
 		exit(1);
