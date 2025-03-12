@@ -1,33 +1,34 @@
-#include <assert.h>
-#include <unistd.h>
-
 #include "hash.h"
 
-static char as_hexdigit(uint8_t n) {
-	static char const hexdigits[] = "0123456789abcdef";
-
-	assert(n < sizeof(hexdigits));
-	return hexdigits[n];
-}
-
-void write_hash128(int fd, struct hash128 hash128) {
-	char hash_text[sizeof(hash128.bytes) * 2];
-
-	for (size_t i = 0; i < sizeof(hash128.bytes); i++) {
-		hash_text[i * 2] = as_hexdigit(hash128.bytes[i] / 16); 
-		hash_text[i * 2 + 1] = as_hexdigit(hash128.bytes[i] % 16); 
+struct hash128_hex hash128_hex(struct hash128 const *hash) {
+	char const hex_digits[] = "0123456789abcdef";
+	struct hash128_hex hex;
+	for (uint8_t i = 0; i < sizeof(hash->hash); i++) {
+		hex.hex[i * 2] = hex_digits[hash->hash[i] / 16];
+		hex.hex[i * 2 + 1] = hex_digits[hash->hash[i] % 16];
 	}
-	write(fd, hash_text, sizeof(hash_text));
+	hex.hex[sizeof(hex.hex) - 1] = '\0';
+	return hex;
 }
 
-void write_hash256(int fd, struct hash256 hash256) {
-	char hash_text[sizeof(hash256.bytes) * 2];
-
-	for (size_t i = 0; i < sizeof(hash256.bytes); i++) {
-		hash_text[i * 2] = as_hexdigit(hash256.bytes[i] / 16); 
-		hash_text[i * 2 + 1] = as_hexdigit(hash256.bytes[i] % 16); 
+struct hash256_hex hash256_hex(struct hash256 const *hash) {
+	char const hex_digits[] = "0123456789abcdef";
+	struct hash256_hex hex;
+	for (uint8_t i = 0; i < sizeof(hash->hash); i++) {
+		hex.hex[i * 2] = hex_digits[hash->hash[i] / 16];
+		hex.hex[i * 2 + 1] = hex_digits[hash->hash[i] % 16];
 	}
-	write(fd, hash_text, sizeof(hash_text));
+	hex.hex[sizeof(hex.hex) - 1] = '\0';
+	return hex;
 }
 
-
+struct hash512_hex hash512_hex(struct hash512 const *hash) {
+	char const hex_digits[] = "0123456789abcdef";
+	struct hash512_hex hex;
+	for (uint8_t i = 0; i < sizeof(hash->hash); i++) {
+		hex.hex[i * 2] = hex_digits[hash->hash[i] / 16];
+		hex.hex[i * 2 + 1] = hex_digits[hash->hash[i] % 16];
+	}
+	hex.hex[sizeof(hex.hex) - 1] = '\0';
+	return hex;
+}

@@ -1,22 +1,19 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <unistd.h>
 
-#define PROG_NAME "ft_ssl"
-#define ERR_PREFIX PROG_NAME ": Error"
+#ifndef PROGRAM
+# define PROGRAM "ft_ssl"
+#endif
 
-size_t ft_strlen(char const *str);
-ssize_t ft_putstr(int fd, char const *str);
-int ft_strcmp(char const *s1, char const *s2);
-bool ft_streq(char const *s1, char const *s2);
-// ssize_t ft_putendl(int fd, char *str);
-bool ft_isprint(char c);
-bool should_be_escaped(char c);
-void print_escaped(int fd, char const *s, size_t len);
-void ft_memcpy(void *dst, void const *src, size_t size);
-void *ft_realloc(void *p, size_t old_size, size_t new_size);
-char *read_to_string(int fd, size_t *len);
-uint32_t circular_left_shift(uint32_t n, uint32_t shift_bits);
-uint32_t circular_right_shift(uint32_t n, uint32_t shift_bits);
+void ft_memcpy(void *dst, void const *src, size_t bytes);
+size_t ft_strlen(char const *s);
+size_t ft_strlen_max(char const *str, size_t max);
+void ft_putstr(int fd, char const *s);
+void ft_putstrs(int fd, char const * const *strs);
+bool ft_streq(char const *a, char const *b);
+uint32_t left_rotate(uint32_t num, uint8_t rotate_amount);
+uint32_t right_rotate(uint32_t num, uint8_t rotate_amount);
+void print_escaped(int fd, uint8_t const *buffer, size_t len);

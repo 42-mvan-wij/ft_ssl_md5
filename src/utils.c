@@ -1,166 +1,156 @@
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdlib.h>
+#include <assert.h>
 #include <unistd.h>
 
-#include "error.h"
+#include "utils.h"
 
-size_t ft_strlen(char *str) {
+void ft_memcpy(void *dst, void const *src, size_t bytes) {
+	uint8_t *dst_p = dst;
+	uint8_t const *src_p = src;
+	for (size_t i = 0; i < bytes; i++) {
+		dst_p[i] = src_p[i];
+	}
+}
+
+size_t ft_strlen(char const *s) {
+	size_t i = 0;
+	while (s[i] != '\0') {
+		i++;
+	}
+	return i;
+}
+
+size_t ft_strlen_max(char const *str, size_t max) {
 	size_t len = 0;
-	while (str[len] != '\0') {
+	while (len < max && str[len] != '\0') {
 		len++;
 	}
 	return len;
 }
 
-ssize_t ft_putstr(int fd, char *str) {
-	size_t len = ft_strlen(str);
-	return write(fd, str, len);
+void ft_putstr(int fd, char const *s) {
+	write(fd, s, ft_strlen(s));
 }
 
-int ft_strcmp(char *s1, char *s2) {
-	size_t i = 0;
-	while (s1[i] != '\0' && s1[i] == s2[i]) {// && s2[i] != '\0'
-		i++;
-	}
-	return s1[i] - s2[i];
-}
-
-bool ft_streq(char *s1, char *s2) {
-	return ft_strcmp(s1, s2) == 0;
-}
-
-// ssize_t ft_putendl(int fd, char *str) {
-// 	size_t len = ft_strlen(str);
-// 	str[len] = '\n';
-// 	ssize_t ret = write(fd, str, len + 1);
-// 	str[len] = '\0';
-// 	return ret;
-// }
-
-bool ft_isprint(char c) {
-	return c >= 32 && c <= 126;
-}
-
-bool should_be_escaped(char c) {
-	return !ft_isprint(c) || c == '\\' || c == '"';
-}
-
-void print_escaped(int fd, char *s, size_t len) {
-	size_t index = 0;
-	while (index < len) {
-		if (should_be_escaped(s[index])) {
-			char *escaped;
-			char c = s[index];
-			index++;
-			switch (c) {
-				case '\\': escaped = "\\\\"; break;
-				case '"': escaped = "\\\""; break;
-				case '\0': escaped = "\\0"; break;
-				case '\t': escaped = "\\t"; break;
-				case '\n': escaped = "\\n"; break;
-				case '\v': escaped = "\\v"; break;
-				case '\f': escaped = "\\f"; break;
-				case '\r': escaped = "\\r"; break;
-				default: {
-					static char hex[] = "0123456789abcdef";
-					unsigned char cc = (unsigned char)c;
-					char ss[] = {'\\', hex[(cc / 16) % 16], hex[cc % 16]};
-					write(fd, ss, 3);
-					continue; // continue the loop, as to not print the other cases
-					break;
-				};
-			}
-			write(fd, escaped, 2);
+void ft_putstrs(int fd, char const * const *strs) {
+	char buffer[1024];
+	size_t buffer_index = 0;
+	while (*strs != NULL) {
+		size_t len = ft_strlen(*strs);
+		if (buffer_index + len <= sizeof(buffer)) {
+			ft_memcpy(buffer + buffer_index, *strs, len);
+			buffer_index += len;
 		}
 		else {
-			size_t printable_len = 1;
-			while (index + printable_len < len && !should_be_escaped(s[index + printable_len])) {
-				printable_len++;
+			write(fd, buffer, buffer_index);
+			buffer_index = 0;
+			if (len <= sizeof(buffer)) {
+				ft_memcpy(buffer + buffer_index, *strs, len);
+				buffer_index += len;
 			}
-			write(fd, &s[index], printable_len);
-			index += printable_len;
+			else {
+				write(fd, *strs, ft_strlen(*strs));
+			}
 		}
+		strs++;
+	}
+	if (buffer_index > 0) {
+		write(fd, buffer, buffer_index);
 	}
 }
 
-// void ft_memcpy(void *dst, void *src, size_t size) {
-// 	char *d = dst;
-// 	char *s = src;
-//
-// 	size_t i = 0;
-// 	while (i < size) {
-// 		d[i] = s[i];
-// 		i++;
-// 	}
-// }
-
-void ft_memcpy(void *dst, void const *src, size_t size) {
-	uint64_t *d64 = dst;
-	uint64_t const *s64 = src;
-	uint8_t *d = dst;
-	uint8_t const *s = src;
-
+bool ft_streq(char const *a, char const *b) {
 	size_t i = 0;
-	while (i < size / sizeof(uint64_t)) {
-		d64[i] = s64[i];
+	while (a[i] == b[i] && a[i] != '\0' && b[i] != '\0') {
 		i++;
 	}
-	i *= sizeof(uint64_t);
-	while (i < size) {
-		d[i] = s[i];
-		i++;
+	return a[i] == b[i];
+}
+
+uint32_t right_rotate(uint32_t num, uint8_t rotate_amount) {
+	return (num >> rotate_amount) | (num << (32 - rotate_amount));
+}
+
+uint32_t left_rotate(uint32_t num, uint8_t rotate_amount) {
+	return (num << rotate_amount) | (num >> (32 - rotate_amount));
+}
+
+#define ESCAPE_BLOCK_INPUT 256
+#define MAX_ESCAPED_LEN 4
+
+static bool needs_escaping(uint8_t c) {
+	return c <= 31 || c == '"' || c == '\\' || c >= 127;
+}
+
+static uint8_t escape(uint8_t c, char *escaped) {
+	static char const hex_digits[] = "0123456789abcdef";
+	switch (c) {
+		case '"': {
+			escaped[0] = '\\';
+			escaped[1] = '"';
+			return 2;
+		}; break;
+		case '\\': {
+			escaped[0] = '\\';
+			escaped[1] = '\\';
+			return 2;
+		}; break;
+		case '\0': {
+			escaped[0] = '\\';
+			escaped[1] = '0';
+			return 2;
+		}; break;
+		case '\t': {
+			escaped[0] = '\\';
+			escaped[1] = 't';
+			return 2;
+		}; break;
+		case '\n': {
+			escaped[0] = '\\';
+			escaped[1] = 'n';
+			return 2;
+		}; break;
+		case '\r': {
+			escaped[0] = '\\';
+			escaped[1] = 'r';
+			return 2;
+		}; break;
+		default: {
+			escaped[0] = '\\';
+			escaped[1] = 'x';
+			escaped[2] = hex_digits[c / 16];
+			escaped[3] = hex_digits[c % 16];
+			return 4;
+		} break;
 	}
 }
 
-void *ft_realloc(void *p, size_t old_size, size_t new_size) {
-	void *new_ptr = malloc(new_size);
-	if (new_ptr == NULL) {
-		free(p);
-		return NULL;
-	}
-	ft_memcpy(new_ptr, p, old_size);
-	free(p);
-	return new_ptr;
-}
-
-char *read_to_string(int fd, size_t *len) {
-	size_t size = sizeof(char) * 64;
-	size_t length = 0;
-	char *s = malloc(size);
-	if (s == NULL) {
-		(void)set_error(E_ERRNO, NULL);
-		return NULL;
-	}
-	while (true) {
-		ssize_t nread = read(fd, s + length, size - (length + 1) * sizeof(char));
-		if (nread < 0) {
-			free(s);
-			(void)set_error(E_ERRNO, NULL);
-			return NULL;
+static void print_escaped_block(int fd, uint8_t const *buffer, size_t len) {
+	assert(len <= ESCAPE_BLOCK_INPUT);
+	char escaped[ESCAPE_BLOCK_INPUT * MAX_ESCAPED_LEN];
+	size_t escaped_index = 0;
+	size_t buffer_index = 0;
+	while (buffer_index < len) {
+		size_t buffer_index_start = buffer_index;
+		while (buffer_index < len && !needs_escaping(buffer[buffer_index])) {
+			buffer_index++;
 		}
-		if (nread == 0) {
-			break;
+		ft_memcpy(escaped + escaped_index, buffer + buffer_index_start, buffer_index - buffer_index_start);
+		escaped_index += buffer_index - buffer_index_start;
+		while (buffer_index < len && needs_escaping(buffer[buffer_index])) {
+			escaped_index += escape(buffer[buffer_index], escaped + escaped_index);
+			buffer_index++;
 		}
-		length += nread;
-		s = ft_realloc(s, size, size * 2);
-		if (s == NULL) {
-			(void)set_error(E_ERRNO, NULL);
-			return NULL;
-		}
-		size *= 2;
 	}
-	s[length] = '\0';
-	*len = length;
-	return s;
+	write(fd, escaped, escaped_index);
 }
 
-__attribute__((no_sanitize("unsigned-shift-base")))
-uint32_t circular_left_shift(uint32_t n, uint32_t shift_bits) {
-	return ((n << shift_bits) | (n >> (sizeof(n) * 8 - shift_bits)));
-}
-
-__attribute__((no_sanitize("unsigned-shift-base")))
-uint32_t circular_right_shift(uint32_t n, uint32_t shift_bits) {
-	return ((n >> shift_bits) | (n << (sizeof(n) * 8 - shift_bits)));
+void print_escaped(int fd, uint8_t const *buffer, size_t len) {
+	while (len > ESCAPE_BLOCK_INPUT) {
+		print_escaped_block(fd, buffer, ESCAPE_BLOCK_INPUT);
+		buffer += ESCAPE_BLOCK_INPUT;
+		len -= ESCAPE_BLOCK_INPUT;
+	}
+	if (len > 0) {
+		print_escaped_block(fd, buffer, len);
+	}
 }

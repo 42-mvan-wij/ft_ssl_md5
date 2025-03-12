@@ -2,5 +2,5 @@
 
 #include "error.h"
 
-t_result cmd_md5(char **args);
-t_result cmd_sha256(char **args);
+t_result md5_digest(char **args);
+t_result sha256_digest(char **args);

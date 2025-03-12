@@ -9,7 +9,8 @@ OBJECTS := $(addprefix $(OBJDIR)/, $(SOURCES:c=o))
 # OBJECTS += $(OBJECTS_BONUS)
 # endif
 
-INCLUDES := $(addprefix -I,$(sort $(dir $(shell find $(SRCDIR) -name '*.h' -not -name '*_bonus.h'))))
+# INCLUDES := $(addprefix -I,$(sort $(dir $(shell find $(SRCDIR) -name '*.h' -not -name '*_bonus.h'))))
+INCLUDES := -I$(SRCDIR)
 CFLAGS := -Wall -Wextra -Werror
 LFLAGS := 
 ifdef NO_WARN
@@ -17,7 +18,8 @@ ifdef NO_WARN
 endif
 CFLAGS += $(INCLUDES)
 ifdef DEBUG
-	SANITIZERS := address,leak,undefined,integer,implicit-conversion,local-bounds,float-divide-by-zero,nullability
+	SANITIZERS := address,leak
+	# SANITIZERS += undefined,integer,implicit-conversion,local-bounds,float-divide-by-zero,nullability
 	CFLAGS += -g -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer
 	LFLAGS += -g -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer
 endif

@@ -1,26 +1,29 @@
 #include <assert.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <unistd.h>
+#include <stdalign.h>
 
-#include "endian.h"
-#include "hash.h"
+#include "endianness.h"
+#include "sha256.h"
 #include "utils.h"
 
-struct sha256 {
-	uint32_t a;
-	uint32_t b;
-	uint32_t c;
-	uint32_t d;
-	uint32_t e;
-	uint32_t f;
-	uint32_t g;
-	uint32_t h;
-};
+struct sha256_state sha256_state(void) {
+	struct sha256_state state = {
+		.a = 0x6a09e667,
+		.b = 0xbb67ae85,
+		.c = 0x3c6ef372,
+		.d = 0xa54ff53a,
+		.e = 0x510e527f,
+		.f = 0x9b05688c,
+		.g = 0x1f83d9ab,
+		.h = 0x5be0cd19,
 
-__attribute__((no_sanitize("unsigned-integer-overflow")))
-static struct sha256 sha256_round(struct sha256 state, void const *buf) {
+		.msg_len = 0,
+	};
+
+	return state;
+}
+
+/// Each block in `m` is host-endian, the blocks are in big-endian
+static struct sha256_state process_chunk(struct sha256_state state, uint32_t const m[16]) {
 	static uint32_t const k[64] = {
 		0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
 		0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -31,166 +34,135 @@ static struct sha256 sha256_round(struct sha256 state, void const *buf) {
 		0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
 		0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 	};
-	
-	struct sha256 original_state = state;
-	uint32_t w[64];
-	ft_memcpy(w, buf, sizeof(uint32_t) * 16);
-	uint32_t const *int_buf = buf;
-	for (size_t i = 0; i < 16; i++) {
-		w[i] = BIG_TO_HOST_ENDIAN(uint32_t, int_buf[i]);
-	}
 
-	for (size_t i = 16; i < 64; i++) {
-		uint32_t s0 = circular_right_shift(w[i - 15], 7) ^ circular_right_shift(w[i - 15], 18) ^ (w[i - 15] >> 3);
-		uint32_t s1 = circular_right_shift(w[i - 2], 17) ^ circular_right_shift(w[i - 2], 19) ^ (w[i - 2] >> 10);
+	uint32_t w[64];
+
+	for (uint8_t i = 0; i < 16; i++) {
+		w[i] = big_to_host32(m[i]);
+	}
+	for (uint8_t i = 16; i < 64; i++) {
+		uint32_t s0 = right_rotate(w[i - 15], 7) ^ right_rotate(w[i - 15], 18) ^ (w[i - 15] >> 3);
+		uint32_t s1 = right_rotate(w[i - 2], 17) ^ right_rotate(w[i - 2], 19) ^ (w[i - 2] >> 10);
 		w[i] = w[i - 16] + s0 + w[i - 7] + s1;
 	}
 
-	for (size_t i = 0; i < 64; i++) {
-		uint32_t ch = (state.e & state.f) ^ ((~state.e) & state.g);
-		uint32_t s1 = circular_right_shift(state.e, 6) ^ circular_right_shift(state.e, 11) ^ circular_right_shift(state.e, 25);
-		uint32_t temp1 = state.h + s1 + ch + k[i] + w[i];
-		uint32_t maj = (state.a & state.b) ^ (state.a & state.c) ^ (state.b & state.c);
-		uint32_t s0 = circular_right_shift(state.a, 2) ^ circular_right_shift(state.a, 13) ^ circular_right_shift(state.a, 22);
-		uint32_t temp2 = s0 + maj;
+	uint32_t a = state.a;
+	uint32_t b = state.b;
+	uint32_t c = state.c;
+	uint32_t d = state.d;
+	uint32_t e = state.e;
+	uint32_t f = state.f;
+	uint32_t g = state.g;
+	uint32_t h = state.h;
 
-		state.h = state.g;
-		state.g = state.f;
-		state.f = state.e;
-		state.e = state.d + temp1;
-		state.d = state.c;
-		state.c = state.b;
-		state.b = state.a;
-		state.a = temp1 + temp2;
+	for (uint8_t i = 0; i < 64; i++) {
+		uint32_t s1 = right_rotate(e, 6) ^ right_rotate(e, 11) ^ right_rotate(e, 25);
+		uint32_t choice = (e & f) ^ ((~e) & g);
+		uint32_t temp1 = h + s1 + choice + k[i] + w[i];
+		uint32_t s0 = right_rotate(a, 2) ^ right_rotate(a, 13) ^ right_rotate(a, 22);
+		uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+		uint32_t temp2 = s0 + majority;
+
+		h = g;
+		g = f;
+		f = e;
+		e = d + temp1;
+		d = c;
+		c = b;
+		b = a;
+		a = temp1 + temp2;
 	}
-	state.a += original_state.a;
-	state.b += original_state.b;
-	state.c += original_state.c;
-	state.d += original_state.d;
-	state.e += original_state.e;
-	state.f += original_state.f;
-	state.g += original_state.g;
-	state.h += original_state.h;
+
+	state.a += a;
+	state.b += b;
+	state.c += c;
+	state.d += d;
+	state.e += e;
+	state.f += f;
+	state.g += g;
+	state.h += h;
+
+	state.msg_len += 512;
+
 	return state;
 }
 
-static struct sha256 sha256_final_round(struct sha256 state, uint8_t *buf, size_t buf_bit_size, uint64_t msg_bit_length) {
-	uint8_t bytes[64];
-	static_assert(sizeof(bytes) * 8 == 512, "Incorrect buf size");
+static struct sha256_state final_chunk(struct sha256_state state, uint32_t const m[16], uint16_t bits) {
+	assert(bits <= 512);
+	uint32_t mm[16];
+	ft_memcpy(mm, m, (bits + 7) / 8);
 
-	size_t index = 0;
-	while (buf_bit_size >= 8) {
-		bytes[index] = buf[index];
-		index++;
-		buf_bit_size -= 8;
+	// Precalculate because msg_len should not include the padding
+	uint64_t total_msg_len = state.msg_len + bits;
+
+	if (bits < 512) {
+		uint8_t *bytes = (void*)mm;
+		uint8_t partial_byte_index = bits / 8;
+		uint8_t partial_bits = bits % 8;
+
+		bytes[partial_byte_index] &= 0xFF << (8 - partial_bits);
+		bytes[partial_byte_index] |= 1 << (8 - partial_bits - 1);
+		
+		for (uint8_t i = partial_byte_index + 1; i < 64; i++) {
+			bytes[i] = 0;
+		}
 	}
-	if (buf_bit_size > 0) {
-		bytes[index] = buf[index];
-		bytes[index] |= 1 << (8 - buf_bit_size - 1);
-		buf_bit_size = 0;
-		index++;
+	if (bits >= 512 - 64) {
+		state = process_chunk(state, mm);
+		for (uint8_t i = 0; i < 14; i++) {
+			mm[i] = 0;
+		}
+	}
+	*(uint64_t*)&mm[14] = host_to_big64(total_msg_len);
+
+	state = process_chunk(state, mm);
+	state.msg_len = total_msg_len;
+	return state;
+}
+
+/// `m` should have a consistent order of bytes (endianness) on different hosts
+/// `m` should be a block of 64 bytes (512 bits)
+struct sha256_state sha256_round(struct sha256_state state, uint8_t const m[64]) {
+	if ((uintptr_t)m % alignof(uint32_t) == 0) {
+		return process_chunk(state, (uint32_t*)m);
+	}
+	uint32_t mm[16];
+	ft_memcpy(mm, m, 64);
+	return process_chunk(state, mm);
+}
+
+/// `m` should have a consistent order of bytes (endianness) on different hosts
+/// `m` should be a block of at most 512 bits (64 bytes)
+struct hash256 sha256_final_round(struct sha256_state state, uint8_t const m[64], uint16_t bits) {
+	assert(bits <= 512);
+	if ((uintptr_t)m % alignof(uint32_t) == 0) {
+		state = final_chunk(state, (uint32_t*)m, bits);
 	}
 	else {
-		bytes[index] = 0x80;
-		index++;
+		uint32_t mm[16] = {0};
+		ft_memcpy(mm, m, (bits + 7) / 8);
+		state = final_chunk(state, mm, bits);
 	}
 
-	if (sizeof(bytes) - index < sizeof(msg_bit_length)) {
-		while (index < sizeof(bytes)) {
-			bytes[index] = 0x00;
-			index++;
-		}
-		state = sha256_round(state, bytes);
-		index = 0;
-	}
-
-	while (index < sizeof(bytes) - sizeof(msg_bit_length)) {
-		bytes[index] = 0x00;
-		index++;
-	}
-	uint8_t *msg_len_ptr = (void *)&msg_bit_length;
-	host_to_big_endian_n(msg_len_ptr, sizeof(msg_bit_length));
-	size_t len_index = 0;
-	while (len_index < sizeof(msg_bit_length)) {
-		bytes[index + len_index] = msg_len_ptr[len_index];
-		len_index++;
-	}
-	return sha256_round(state, bytes);
-}
-
-static struct sha256 sha256_initial_state(void) {
-	return (struct sha256){
-		.a = 0x6a09e667,
-		.b = 0xbb67ae85,
-		.c = 0x3c6ef372,
-		.d = 0xa54ff53a,
-		.e = 0x510e527f,
-		.f = 0x9b05688c,
-		.g = 0x1f83d9ab,
-		.h = 0x5be0cd19,
-	};
-}
-
-static struct hash256 sha256_to_hash(struct sha256 sha256) {
-	struct hash256 hash256;
-	uint32_t *bytes = (void*)hash256.bytes;
-#if BYTE_ORDER == LITTLE_ENDIAN
-	bytes[0] = sha256.h;
-	bytes[1] = sha256.g;
-	bytes[2] = sha256.f;
-	bytes[3] = sha256.e;
-	bytes[4] = sha256.d;
-	bytes[5] = sha256.c;
-	bytes[6] = sha256.b;
-	bytes[7] = sha256.a;
-	big_to_little_endian_n(hash256.bytes, sizeof(hash256.bytes));
-#elif BYTE_ORDER == BIG_ENDIAN
-	bytes[0] = sha256.a;
-	bytes[1] = sha256.b;
-	bytes[2] = sha256.c;
-	bytes[3] = sha256.d;
-	bytes[4] = sha256.e;
-	bytes[5] = sha256.f;
-	bytes[6] = sha256.g;
-	bytes[7] = sha256.h;
-#else
-#error "Unknown byte order"
+#if BYTE_ORDER != BIG_ENDIAN
+	state.a = host_to_big32(state.a);
+	state.b = host_to_big32(state.b);
+	state.c = host_to_big32(state.c);
+	state.d = host_to_big32(state.d);
+	state.e = host_to_big32(state.e);
+	state.f = host_to_big32(state.f);
+	state.g = host_to_big32(state.g);
+	state.h = host_to_big32(state.h);
 #endif
-	return hash256;
+
+	struct hash256 hash;
+	ft_memcpy(hash.hash + 0, &state.a, sizeof(state.a));
+	ft_memcpy(hash.hash + 4, &state.b, sizeof(state.b));
+	ft_memcpy(hash.hash + 8, &state.c, sizeof(state.c));
+	ft_memcpy(hash.hash + 12, &state.d, sizeof(state.d));
+	ft_memcpy(hash.hash + 16, &state.e, sizeof(state.e));
+	ft_memcpy(hash.hash + 20, &state.f, sizeof(state.f));
+	ft_memcpy(hash.hash + 24, &state.g, sizeof(state.g));
+	ft_memcpy(hash.hash + 28, &state.h, sizeof(state.h));
+	return hash;
 }
-
-struct hash256 sha256_buf(void *buf, size_t buf_size) {
-	struct sha256 state = sha256_initial_state();
-	size_t msg_length = buf_size;
-
-	while (buf_size * 8 >= 512) {
-		state = sha256_round(state, buf);
-		buf_size -= 512 / 8;
-	}
-	
-	return sha256_to_hash(sha256_final_round(state, buf, buf_size * 8, msg_length * 8));
-}
-
-struct hash256 sha256_fd(int fd) {
-	struct sha256 state = sha256_initial_state();
-	uint8_t buf[64];
-	size_t buf_length = 0;
-	uint64_t msg_length = 0;
-
-	while (true) {
-		buf_length = 0;
-		do {
-			ssize_t nread = read(fd, buf, sizeof(buf));
-			if (nread < 0) {
-				// FIXME: error
-			}
-			buf_length += nread;
-			msg_length += nread;
-			if (nread == 0) {
-				return sha256_to_hash(sha256_final_round(state, buf, buf_length * 8, msg_length * 8));
-			}
-		} while (buf_length != sizeof(buf));
-		state = sha256_round(state, buf);
-	}
-}
-

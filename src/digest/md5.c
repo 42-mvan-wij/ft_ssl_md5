@@ -1,28 +1,47 @@
 #include <assert.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <unistd.h>
+#include <stdalign.h> // TODO: remove?
 
-#include "endian.h"
-#include "hash.h"
+#include "endianness.h"
+#include "md5.h"
 #include "utils.h"
 
-struct md5 {
-	uint32_t a;
-	uint32_t b;
-	uint32_t c;
-	uint32_t d;
-};
+struct md5_state md5_state(void) {
+	struct md5_state state = {
+		.a = 0x67452301,
+		.b = 0xefcdab89,
+		.c = 0x98badcfe,
+		.d = 0x10325476,
 
-__attribute__((no_sanitize("unsigned-integer-overflow")))
-static struct md5 md5_round(struct md5 state, void const *buf) {
-	static uint32_t const shift_amounts[64] = {
-		7, 12, 17, 22,  7, 12, 17, 22,  7, 12, 17, 22,  7, 12, 17, 22,
-		5,  9, 14, 20,  5,  9, 14, 20,  5,  9, 14, 20,  5,  9, 14, 20,
-		4, 11, 16, 23,  4, 11, 16, 23,  4, 11, 16, 23,  4, 11, 16, 23,
-		6, 10, 15, 21,  6, 10, 15, 21,  6, 10, 15, 21,  6, 10, 15, 21,
+		.msg_len = 0,
 	};
+
+	return state;
+}
+
+/// Each block in `m` is host-endian, the blocks are in big-endian
+static struct md5_state process_chunk(struct md5_state state, uint32_t const m[16]) {
+	static uint8_t const s[64] = {
+		7, 12, 17, 22,
+		7, 12, 17, 22,
+		7, 12, 17, 22,
+		7, 12, 17, 22,
+
+		5,  9, 14, 20,
+		5,  9, 14, 20,
+		5,  9, 14, 20,
+		5,  9, 14, 20,
+
+		4, 11, 16, 23,
+		4, 11, 16, 23,
+		4, 11, 16, 23,
+		4, 11, 16, 23,
+
+		6, 10, 15, 21,
+		6, 10, 15, 21,
+		6, 10, 15, 21,
+		6, 10, 15, 21,
+	};
+
 	static uint32_t const k[64] = {
 		0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
 		0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
@@ -41,148 +60,116 @@ static struct md5 md5_round(struct md5 state, void const *buf) {
 		0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
 		0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
 	};
-	
-	struct md5 original_state = state;
-	uint32_t *int_buf = (void *)buf;
 
-	for (size_t i = 0; i < 64; i++) {
+	uint32_t a = state.a;
+	uint32_t b = state.b;
+	uint32_t c = state.c;
+	uint32_t d = state.d;
+
+	for (uint8_t i = 0; i < 64; i++) {
 		uint32_t f;
-		size_t g;
+		uint16_t g;
+
 		if (i < 16) {
-			f = (state.b & state.c) | ((~state.b) & state.d);
+			f = (b & c) | ((~b) & d);
 			g = i;
 		}
 		else if (i < 32) {
-			f = (state.d & state.b) | ((~state.d) & state.c);
-			g = (i * 5 + 1) % 16;
+			f = (d & b) | ((~d) & c);
+			g = (5 * i + 1) % 16;
 		}
 		else if (i < 48) {
-			f = state.b ^ state.c ^ state.d;
-			g = (i * 3 + 5) % 16;
+			f = b ^ c ^ d;
+			g = (3 * i + 5) % 16;
 		}
 		else {
-			f = state.c ^ (state.b | (~state.d));
-			g = (i * 7) % 16;
+			f = c ^ (b | (~d));
+			g = (7 * i) % 16;
 		}
-
-		f += state.a + k[i] + LITTLE_TO_HOST_ENDIAN(uint32_t, int_buf[g]);
-		state.a = state.d;
-		state.d = state.c;
-		state.c = state.b;
-		state.b += circular_left_shift(f, shift_amounts[i]);
+		f += a + k[i] + little_to_host32(m[g]);
+		a = d;
+		d = c;
+		c = b;
+		b += left_rotate(f, s[i]);
 	}
-	state.a += original_state.a;
-	state.b += original_state.b;
-	state.c += original_state.c;
-	state.d += original_state.d;
+
+	state.a += a;
+	state.b += b;
+	state.c += c;
+	state.d += d;
+
+	state.msg_len += 512;
+
 	return state;
 }
 
-static struct md5 md5_final_round(struct md5 state, uint8_t *buf, size_t buf_bit_size, uint64_t msg_bit_length) {
-	uint8_t bytes[64];
-	static_assert(sizeof(bytes) * 8 == 512, "Incorrect buf size");
+static struct md5_state final_chunk(struct md5_state state, uint32_t const m[16], uint16_t bits) {
+	assert(bits <= 512);
+	uint32_t mm[16];
+	ft_memcpy(mm, m, (bits + 7) / 8);
 
-	size_t index = 0;
-	while (buf_bit_size >= 8) {
-		bytes[index] = buf[index];
-		index++;
-		buf_bit_size -= 8;
+	// Precalculate because msg_len should not include the padding
+	uint64_t total_msg_len = state.msg_len + bits;
+
+	if (bits < 512) {
+		uint8_t *bytes = (void*)mm;
+		uint8_t partial_byte_index = bits / 8;
+		uint8_t partial_bits = bits % 8;
+
+		bytes[partial_byte_index] &= 0xFF << (8 - partial_bits);
+		bytes[partial_byte_index] |= (uint32_t)1 << (8 - partial_bits - 1);
+		
+		for (uint8_t i = partial_byte_index + 1; i < 64; i++) {
+			bytes[i] = 0;
+		}
 	}
-	if (buf_bit_size > 0) {
-		bytes[index] = buf[index];
-		bytes[index] |= 1 << (8 - buf_bit_size - 1);
-		buf_bit_size = 0;
-		index++;
+	if (bits >= 512 - 64) {
+		state = process_chunk(state, mm);
+		for (uint8_t i = 0; i < 14; i++) {
+			mm[i] = 0;
+		}
+	}
+	*(uint64_t*)&mm[14] = host_to_little64(total_msg_len);
+
+	state = process_chunk(state, mm);
+	state.msg_len = total_msg_len;
+	return state;
+}
+
+/// `m` should have a consistent order of bytes (endianness) on different hosts
+/// `m` should be a block of 64 bytes (512 bits)
+struct md5_state md5_round(struct md5_state state, uint8_t const m[64]) {
+	if ((uintptr_t)m % alignof(uint32_t) == 0) {
+		return process_chunk(state, (uint32_t*)m);
+	}
+	uint32_t mm[16];
+	ft_memcpy(mm, m, 64);
+	return process_chunk(state, mm);
+}
+
+/// `m` should have a consistent order of bytes (endianness) on different hosts
+struct hash128 md5_final_round(struct md5_state state, uint8_t const m[64], uint16_t bits) {
+	assert(bits <= 512);
+	if ((uintptr_t)m % alignof(uint32_t) == 0) {
+		state = final_chunk(state, (uint32_t*)m, bits);
 	}
 	else {
-		bytes[index] = 0x80;
-		index++;
+		uint32_t mm[16] = {0};
+		ft_memcpy(mm, m, (bits + 7) / 8);
+		state = final_chunk(state, mm, bits);
 	}
 
-	if (sizeof(bytes) - index < sizeof(msg_bit_length)) {
-		while (index < sizeof(bytes)) {
-			bytes[index] = 0x00;
-			index++;
-		}
-		state = md5_round(state, bytes);
-		index = 0;
-	}
-
-	while (index < sizeof(bytes) - sizeof(msg_bit_length)) {
-		bytes[index] = 0x00;
-		index++;
-	}
-	uint8_t *msg_len_ptr = (void *)&msg_bit_length;
-	host_to_little_endian_n(msg_len_ptr, sizeof(msg_bit_length));
-	size_t len_index = 0;
-	while (len_index < sizeof(msg_bit_length)) {
-		bytes[index + len_index] = msg_len_ptr[len_index];
-		len_index++;
-	}
-	return md5_round(state, bytes);
-}
-
-static struct md5 md5_initial_state(void) {
-	return (struct md5){
-		.a = 0x67452301,
-		.b = 0xefcdab89,
-		.c = 0x98badcfe,
-		.d = 0x10325476,
-	};
-}
-
-static struct hash128 md5_to_hash(struct md5 md5) {
-	struct hash128 hash128;
-	uint32_t *bytes = (void*)hash128.bytes;
-#if BYTE_ORDER == LITTLE_ENDIAN
-	bytes[0] = md5.a;
-	bytes[1] = md5.b;
-	bytes[2] = md5.c;
-	bytes[3] = md5.d;
-#elif BYTE_ORDER == BIG_ENDIAN
-	bytes[0] = md5.d;
-	bytes[1] = md5.c;
-	bytes[2] = md5.b;
-	bytes[3] = md5.a;
-	little_to_big_endian_n(hash256.bytes, sizeof(hash256.bytes));
-#else
-#error "Unknown byte order"
+#if BYTE_ORDER != LITTLE_ENDIAN
+	state.a = host_to_little32(state.a);
+	state.b = host_to_little32(state.b);
+	state.c = host_to_little32(state.c);
+	state.d = host_to_little32(state.d);
 #endif
-	return hash128;
+
+	struct hash128 hash;
+	ft_memcpy(hash.hash + 0, &state.a, sizeof(state.a));
+	ft_memcpy(hash.hash + 4, &state.b, sizeof(state.b));
+	ft_memcpy(hash.hash + 8, &state.c, sizeof(state.c));
+	ft_memcpy(hash.hash + 12, &state.d, sizeof(state.d));
+	return hash;
 }
-
-struct hash128 md5_buf(void *buf, size_t buf_size) {
-	struct md5 state = md5_initial_state();
-	size_t msg_length = buf_size;
-
-	while (buf_size * 8 >= 512) {
-		state = md5_round(state, buf);
-		buf_size -= 512 / 8;
-	}
-	
-	return md5_to_hash(md5_final_round(state, buf, buf_size * 8, msg_length * 8));
-}
-
-struct hash128 md5_fd(int fd) {
-	struct md5 state = md5_initial_state();
-	uint8_t buf[64];
-	size_t buf_length = 0;
-	uint64_t msg_length = 0;
-
-	while (true) {
-		buf_length = 0;
-		do {
-			ssize_t nread = read(fd, buf, sizeof(buf));
-			if (nread < 0) {
-				// FIXME: error
-			}
-			buf_length += nread;
-			msg_length += nread;
-			if (nread == 0) {
-				return md5_to_hash(md5_final_round(state, buf, buf_length * 8, msg_length * 8));
-			}
-		} while (buf_length != sizeof(buf));
-		state = md5_round(state, buf);
-	}
-}
-

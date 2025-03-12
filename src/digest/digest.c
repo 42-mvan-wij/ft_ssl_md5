@@ -1,13 +1,15 @@
-#include <assert.h>
 #include <fcntl.h>
-#include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "error.h"
 #include "md5.h"
 #include "sha256.h"
 #include "utils.h"
+
+#define DIGEST_BLOCK_SIZE 512
+#define DIGEST_BLOCK_BYTES (DIGEST_BLOCK_SIZE / 8)
 
 struct digest_args {
 	char **files;
@@ -18,6 +20,34 @@ struct digest_args {
 	bool reverse;
 };
 
+enum e_digest {
+	D_MD5,
+	D_SHA256,
+};
+
+typedef union {
+	struct md5_state md5_state;
+	struct sha256_state sha256_state;
+} t_digest_state;
+
+typedef union {
+	struct hash128 md5;
+	struct hash256 sha256;
+} t_digest_hash;
+
+static t_digest_state digest_state(enum e_digest digest) {
+	t_digest_state state;
+
+	switch (digest) {
+		case D_MD5:
+			state.md5_state = md5_state();
+			return state;
+		case D_SHA256:
+			state.sha256_state = sha256_state();
+			return state;
+	}
+}
+
 static t_result parse_digest_args(char **args, struct digest_args *opts) {
 	*opts = (struct digest_args){
 		.files = NULL,
@@ -25,7 +55,7 @@ static t_result parse_digest_args(char **args, struct digest_args *opts) {
 		.print = false,
 		.quiet = false,
 		.reverse = false,
-		.string = false,
+		.string = NULL,
 	};
 
 	size_t index = 0;
@@ -42,12 +72,18 @@ static t_result parse_digest_args(char **args, struct digest_args *opts) {
 		}
 		else if (ft_streq(&arg[1], "s")) {
 			index++;
+			if (opts->string != NULL) {
+				set_err_object(arg);
+				return set_error(E_DUPLICATE_OPT, "Duplicate option");
+			}
 			if (args[index] == NULL) {
+				set_err_object(arg);
 				return set_error(E_OPT_MISSING_VALUE, "Option expected value, but it is missing");
 			}
 			opts->string = args[index];
 		}
 		else {
+			set_err_object(arg);
 			return set_error(E_UNEXPECTED_OPT, "Unexpected option");
 		}
 		index++;
@@ -56,29 +92,102 @@ static t_result parse_digest_args(char **args, struct digest_args *opts) {
 		while (args[index + opts->file_num] != NULL) {
 			opts->file_num++;
 		}
-		opts->files = malloc(sizeof(char *) * opts->file_num);
-		if (opts->files == NULL) {
-			return set_error(E_ERRNO, NULL);
-		}
-		size_t i = 0;
-		while (args[index] != NULL) {
-			opts->files[i] = args[index];
-			index++;
-			i++;
-		}
+		opts->files = &args[index];
+		index += opts->file_num;
 	}
+
 	return OK;
 }
 
-static void print_md5_buf(char *buf, size_t size, struct digest_args *const opts) {
-	struct hash128 hash128 = md5_buf(buf, size);
-	if (!opts->reverse && !opts->quiet) {
-		ft_putstr(STDOUT_FILENO, "MD5(\"");
+struct digest_file_stream {
+	int fd;
+	uint8_t buffer[DIGEST_BLOCK_BYTES];
+};
+
+static struct digest_file_stream file_stream(int fd) {
+	struct digest_file_stream stream = {
+		.fd = fd,
+	};
+	return stream;
+}
+
+static ssize_t read_file_block(struct digest_file_stream *stream) {
+	int fd = stream->fd;
+	uint8_t *buffer = stream->buffer;
+
+	size_t buffer_filled = 0;
+	ssize_t nread = read(fd, buffer, sizeof(stream->buffer));
+	while (nread > 0) {
+		buffer_filled += nread;
+		nread = read(fd, buffer, sizeof(stream->buffer) - buffer_filled);
+	};
+	return buffer_filled;
+}
+
+static t_digest_state digest_round(enum e_digest digest, t_digest_state state, const uint8_t m[DIGEST_BLOCK_BYTES]) {
+	switch (digest) {
+		case D_MD5:
+			state.md5_state = md5_round(state.md5_state, m);
+			return state;
+		case D_SHA256:
+			state.sha256_state = sha256_round(state.sha256_state, m);
+			return state;
+	}
+}
+
+static t_digest_hash digest_final_round(enum e_digest digest, t_digest_state state, const uint8_t m[DIGEST_BLOCK_BYTES], uint16_t bits) {
+	t_digest_hash hash;
+	switch (digest) {
+		case D_MD5:
+			hash.md5 = md5_final_round(state.md5_state, m, bits);
+			return hash;
+		case D_SHA256:
+			hash.sha256 = sha256_final_round(state.sha256_state, m, bits);
+			return hash;
+	}
+}
+
+static void print_hash(int fd, enum e_digest digest, t_digest_hash *hash) {
+	switch (digest) {
+		case D_MD5: {
+			struct hash128_hex hex = hash128_hex(&hash->md5);
+			ft_putstr(fd, hex.hex);
+			return;
+		}
+		case D_SHA256: {
+			struct hash256_hex hex = hash256_hex(&hash->sha256);
+			ft_putstr(fd, hex.hex);
+			return;
+		}
+	}
+}
+
+static char const *digest_name(enum e_digest digest) {
+	static char const *const names[] = {
+		[D_MD5] = "MD5",
+		[D_SHA256] = "SHA256",
+	};
+
+	return names[digest];
+}
+
+static void print_digest_buf(enum e_digest digest, uint8_t *buf, size_t size, struct digest_args *const opts) {
+	t_digest_state state = digest_state(digest);
+
+	if (!opts->quiet && !opts->reverse) {
+		ft_putstrs(STDOUT_FILENO, (char const*[]){digest_name(digest), "(\"", NULL});
 		print_escaped(STDOUT_FILENO, buf, size);
 		ft_putstr(STDOUT_FILENO, "\")= ");
 	}
-	write_hash128(STDOUT_FILENO, hash128);
-	if (opts->reverse && !opts->quiet) {
+
+	size_t buf_index = 0;
+	while (size - buf_index > DIGEST_BLOCK_BYTES) {
+		state = digest_round(digest, state, buf + buf_index);
+	}
+	t_digest_hash hash = digest_final_round(digest, state, buf + buf_index, (size - buf_index) * 8);
+	print_hash(STDOUT_FILENO, digest, &hash);
+
+	if (!opts->quiet && opts->reverse) {
 		ft_putstr(STDOUT_FILENO, " \"");
 		print_escaped(STDOUT_FILENO, buf, size);
 		ft_putstr(STDOUT_FILENO, "\"");
@@ -86,153 +195,132 @@ static void print_md5_buf(char *buf, size_t size, struct digest_args *const opts
 	ft_putstr(STDOUT_FILENO, "\n");
 }
 
-static void print_md5_fd(int fd, char *filename, struct digest_args *const opts) {
-	struct hash128 hash128 = md5_fd(fd);
-	if (!opts->reverse && !opts->quiet) {
-		ft_putstr(STDOUT_FILENO, "MD5(");
-		ft_putstr(STDOUT_FILENO, filename);
-		ft_putstr(STDOUT_FILENO, ")= ");
-	}
-	write_hash128(STDOUT_FILENO, hash128);
-	if (opts->reverse && !opts->quiet) {
-		ft_putstr(STDOUT_FILENO, " *");
-		ft_putstr(STDOUT_FILENO, filename);
-	}
-	ft_putstr(STDOUT_FILENO, "\n");
-}
+static t_result print_digest_file(enum e_digest digest, int fd, char *filename, struct digest_args *const opts) {
+	t_digest_state state = digest_state(digest);
+	struct digest_file_stream stream = file_stream(fd);
 
-static t_result exec_md5(struct digest_args *const opts) {
-	if ((opts->file_num == 0 && !opts->string) || opts->print) {
-		if (opts->print) {
-			size_t len;
-			char *input = read_to_string(STDIN_FILENO, &len);
-			if (input == NULL) {
-				assert(get_error() != E_NONE);
-				return FAIL;
-			}
-			if (opts->quiet) {
-				ft_putstr(STDOUT_FILENO, "\"");
-				print_escaped(STDOUT_FILENO, input, len);
-				ft_putstr(STDOUT_FILENO, "\"\n");
-			}
-			print_md5_buf(input, len, opts);
-			free(input);
+	if (!opts->quiet && !opts->reverse) {
+		ft_putstrs(STDOUT_FILENO, (char const*[]){digest_name(digest), "(", filename, ")= ", NULL});
+	}
+
+	while (true) {
+		ssize_t nread = read_file_block(&stream);
+		if (nread < 0) {
+			return set_error(E_ERRNO, "");
+		}
+
+		if (nread == DIGEST_BLOCK_BYTES) {
+			state = digest_round(digest, state, stream.buffer);
 		}
 		else {
-			print_md5_fd(STDIN_FILENO, "stdin", opts);
+			t_digest_hash hash = digest_final_round(digest, state, stream.buffer, nread * 8);
+			print_hash(STDOUT_FILENO, digest, &hash);
+			break;
 		}
+	}
+
+	if (!opts->quiet && opts->reverse) {
+		ft_putstrs(STDOUT_FILENO, (char const*[]){" ", filename, NULL});
+	}
+	ft_putstr(STDOUT_FILENO, "\n");
+	return OK;
+}
+
+static t_result print_digest_stdin(enum e_digest digest, struct digest_args *const opts) {
+	if (!opts->print) {
+		return print_digest_file(digest, STDIN_FILENO, "<stdin>", opts);
+	}
+
+	t_digest_state state = digest_state(digest);
+	struct digest_file_stream stream = file_stream(STDIN_FILENO);
+
+	if (!opts->quiet) {
+		ft_putstrs(STDOUT_FILENO, (char const*[]){digest_name(digest), "(", NULL});
+	}
+	ft_putstr(STDOUT_FILENO, "\"");
+
+	while (true) {
+		ssize_t nread = read_file_block(&stream);
+		if (nread < 0) {
+			return set_error(E_ERRNO, "");
+		}
+
+		print_escaped(STDOUT_FILENO, stream.buffer, nread);
+
+		if (nread == DIGEST_BLOCK_BYTES) {
+			state = digest_round(digest, state, stream.buffer);
+		}
+		else {
+			ft_putstr(STDOUT_FILENO, "\"");
+			if (!opts->quiet) {
+				ft_putstr(STDOUT_FILENO, ")= ");
+			}
+			else {
+				ft_putstr(STDOUT_FILENO, "\n");
+			}
+			t_digest_hash hash = digest_final_round(digest, state, stream.buffer, nread * 8);
+			print_hash(STDOUT_FILENO, digest, &hash);
+			break;
+		}
+	}
+	ft_putstr(STDOUT_FILENO, "\n");
+	return OK;
+}
+
+static t_result exec_digest(enum e_digest digest, struct digest_args *const opts) {
+	if ((opts->file_num == 0 && !opts->string) || opts->print) {
+		set_err_object("<stdin>");
+		if (print_digest_stdin(digest, opts) != OK) {
+			return propagate_error();
+		}
+		reset_err_object();
 	}
 
 	if (opts->string != NULL) {
-		print_md5_buf(opts->string, ft_strlen(opts->string), opts);
+		print_digest_buf(digest, (uint8_t*)opts->string, ft_strlen(opts->string), opts);
 	}
 
 	for (size_t i = 0; i < opts->file_num; i++) {
+		set_err_object(opts->files[i]);
 		int fd = open(opts->files[i], O_RDONLY);
 		if (fd < 0) {
-			(void)set_error(E_ERRNO, opts->files[i]);
-			print_error(STDERR_FILENO, PROG_NAME ": md5");
-			clear_error();
+			print_error_local(STDERR_FILENO, NULL, E_ERRNO, NULL, NULL);
 			continue;
 		}
-		print_md5_fd(fd, opts->files[i], opts);
+		if (print_digest_file(digest, fd, opts->files[i], opts) != OK) {
+			close(fd);
+			return propagate_error();
+		}
 		close(fd);
 	}
+	reset_err_object();
 	return OK;
 }
 
-static void print_sha256_buf(char *buf, size_t size, struct digest_args *const opts) {
-	struct hash256 hash256 = sha256_buf(buf, size);
-	if (!opts->reverse && !opts->quiet) {
-		ft_putstr(STDOUT_FILENO, "SHA256(\"");
-		print_escaped(STDOUT_FILENO, buf, size);
-		ft_putstr(STDOUT_FILENO, "\")= ");
+t_result md5_digest(char **args) {
+	set_err_prefix("md5");
+	struct digest_args opts;
+	if (
+		parse_digest_args(args, &opts) != OK ||
+		exec_digest(D_MD5, &opts) != OK
+	) {
+		print_error(STDERR_FILENO);
+		exit(1);
 	}
-	write_hash256(STDOUT_FILENO, hash256);
-	if (opts->reverse && !opts->quiet) {
-		ft_putstr(STDOUT_FILENO, " \"");
-		print_escaped(STDOUT_FILENO, buf, size);
-		ft_putstr(STDOUT_FILENO, "\"");
-	}
-	ft_putstr(STDOUT_FILENO, "\n");
+	reset_err_prefix();
+	return reset_error();
 }
 
-static void print_sha256_fd(int fd, char *filename, struct digest_args *const opts) {
-	struct hash256 hash256 = sha256_fd(fd);
-	if (!opts->reverse && !opts->quiet) {
-		ft_putstr(STDOUT_FILENO, "SHA256(");
-		ft_putstr(STDOUT_FILENO, filename);
-		ft_putstr(STDOUT_FILENO, ")= ");
+t_result sha256_digest(char **args) {
+	set_err_prefix("sha256");
+	struct digest_args opts;
+	if (
+		parse_digest_args(args, &opts) != OK ||
+		exec_digest(D_SHA256, &opts) != OK
+	) {
+		print_error(STDERR_FILENO);
+		exit(1);
 	}
-	write_hash256(STDOUT_FILENO, hash256);
-	if (opts->reverse && !opts->quiet) {
-		ft_putstr(STDOUT_FILENO, " *");
-		ft_putstr(STDOUT_FILENO, filename);
-	}
-	ft_putstr(STDOUT_FILENO, "\n");
+	reset_err_prefix();
+	return reset_error();
 }
-
-static t_result exec_sha256(struct digest_args *const opts) {
-	if ((opts->file_num == 0 && !opts->string) || opts->print) {
-		if (opts->print) {
-			size_t len;
-			char *input = read_to_string(STDIN_FILENO, &len);
-			if (input == NULL) {
-				assert(get_error() != E_NONE);
-				return FAIL;
-			}
-			if (opts->quiet) {
-				ft_putstr(STDOUT_FILENO, "\"");
-				print_escaped(STDOUT_FILENO, input, len);
-				ft_putstr(STDOUT_FILENO, "\"\n");
-			}
-			print_sha256_buf(input, len, opts);
-			free(input);
-		}
-		else {
-			print_sha256_fd(STDIN_FILENO, "stdin", opts);
-		}
-	}
-
-	if (opts->string != NULL) {
-		print_sha256_buf(opts->string, ft_strlen(opts->string), opts);
-	}
-
-	for (size_t i = 0; i < opts->file_num; i++) {
-		int fd = open(opts->files[i], O_RDONLY);
-		if (fd < 0) {
-			(void)set_error(E_ERRNO, opts->files[i]);
-			print_error(STDERR_FILENO, PROG_NAME ": sha256");
-			clear_error();
-			continue;
-		}
-		print_sha256_fd(fd, opts->files[i], opts);
-		close(fd);
-	}
-	return OK;
-}
-
-t_result cmd_md5(char **args) {
-	struct digest_args opts = {.files = NULL};
-	if (parse_digest_args(args, &opts) != OK
-		|| exec_md5(&opts) != OK)
-	{
-		free(opts.files);
-		return FAIL;
-	}
-	free(opts.files);
-	return OK;
-}
-
-t_result cmd_sha256(char **args) {
-	struct digest_args opts = {.files = NULL};
-	if (parse_digest_args(args, &opts) != OK
-		|| exec_sha256(&opts) != OK)
-	{
-		free(opts.files);
-		return FAIL;
-	}
-	free(opts.files);
-	return OK;
-}
-
